@@ -1,0 +1,5 @@
+{
+  "platformio-ide.activateProjectOnTextEditorChange": true,
+  "platformio-ide.autoPreloadEnvTasks": true,
+  "platformio-ide.showEditorTitleShortcuts": true
+}
