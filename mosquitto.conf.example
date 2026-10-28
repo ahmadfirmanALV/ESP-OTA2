@@ -1,0 +1,4 @@
+# Contoh untuk prototipe di LAN tepercaya saja.
+# Jangan port-forward port 1883 ke internet.
+listener 1883
+allow_anonymous true

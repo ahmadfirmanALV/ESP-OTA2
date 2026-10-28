@@ -14,11 +14,15 @@ void setup() {
 
   if (!appLogInit()) {
     Serial.println("Gagal membuat mutex logger.");
+    delay(1000);
+    ESP.restart();
     return;
   }
 
   if (!appEventsInit()) {
     appLog("Gagal membuat event group FreeRTOS.");
+    delay(1000);
+    ESP.restart();
     return;
   }
 
@@ -31,11 +35,17 @@ void setup() {
 
   if (!wifiTaskStart()) {
     appLog("Gagal memulai task WiFi.");
+    delay(1000);
+    ESP.restart();
+    return;
   }
 
   // Task OTA menunggu WIFI_CONNECTED_BIT sebelum memulai ArduinoOTA.
   if (!otaTaskStart()) {
     appLog("Gagal memulai task OTA.");
+    delay(1000);
+    ESP.restart();
+    return;
   }
 }
 

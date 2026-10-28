@@ -2,6 +2,18 @@
 
 #include <Arduino.h>
 
+#if __has_include("ota_secrets.h")
+#include "ota_secrets.h"
+#endif
+
+#ifndef OTA_MQTT_USERNAME
+#define OTA_MQTT_USERNAME ""
+#endif
+
+#ifndef OTA_MQTT_PASSWORD
+#define OTA_MQTT_PASSWORD ""
+#endif
+
 namespace AppConfig {
 
 constexpr uint8_t LED_PIN = 2; // LED onboard D2 / GPIO2 pada DOIT ESP32 DEVKIT V1
@@ -11,19 +23,34 @@ constexpr char WIFI_AP_NAME[] = "ESP32-Setup";
 constexpr char WIFI_AP_PASSWORD[] = "12345678";
 constexpr uint16_t WIFI_PORTAL_TIMEOUT_SECONDS = 180;
 
-// IP perangkat kedua; ESP pertama tetap memakai 192.168.211.107.
+// IP perangkat kedua; server laptop memakai 192.168.211.251.
 constexpr bool USE_STATIC_IP = true;
 
 // Konfigurasi IP statis (hanya aktif jika USE_STATIC_IP = true).
-constexpr uint8_t WIFI_STATIC_IP[] = {192, 168, 211, 251};
+constexpr uint8_t WIFI_STATIC_IP[] = {192, 168, 211, 252};
 constexpr uint8_t WIFI_GATEWAY[] = {192, 168, 211, 15};
 constexpr uint8_t WIFI_SUBNET[] = {255, 255, 255, 0};
-constexpr uint8_t WIFI_DNS[] = {192, 168, 211, 15};
+constexpr uint8_t WIFI_DNS[] = {8, 8, 8, 8};
 
 // Beri hostname berbeda pada setiap ESP agar OTA/mDNS tidak saling bentrok.
 // Password dikosongkan ("") agar sistem OTA tidak memerlukan password.
 constexpr char OTA_HOSTNAME[] = "esp32-ota-02";
 constexpr char OTA_PASSWORD[] = "";
+
+// Alamat HTTP server firmware lokal; harus dapat dijangkau ESP32 di LAN.
+constexpr uint8_t OTA_SERVER_IP[] = {192, 168, 211, 251};
+// Alamat broker boleh berupa IP lokal atau hostname broker eksternal.
+constexpr char MQTT_BROKER_HOST[] = "192.168.211.251";
+constexpr uint16_t MQTT_PORT = 1883;
+constexpr uint16_t OTA_HTTP_PORT = 5000;
+constexpr char MQTT_TOPIC_OTA[] = "gateway/ota/update";
+constexpr char MQTT_TOPIC_STATUS[] = "gateway/status";
+constexpr char MQTT_CLIENT_ID[] = "esp32-ota-02";
+constexpr char MQTT_USERNAME[] = OTA_MQTT_USERNAME;
+constexpr char MQTT_PASSWORD[] = OTA_MQTT_PASSWORD;
+constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
+constexpr uint32_t OTA_RETRY_INTERVAL_MS = 30000;
+constexpr uint32_t OTA_VALIDATION_TIMEOUT_MS = 240000;
 
 constexpr bool BLINK_MODE = false;
 constexpr uint32_t BLINK_INTERVAL_MS = 500;
@@ -33,7 +60,7 @@ constexpr uint32_t BLINK_INTERVAL_MS = 500;
 constexpr bool RESET_WIFI_SETTINGS_ON_BOOT = false;
 
 constexpr uint32_t WIFI_TASK_STACK_BYTES = 8192;
-constexpr uint32_t OTA_TASK_STACK_BYTES = 4096;
+constexpr uint32_t OTA_TASK_STACK_BYTES = 8192;
 constexpr uint32_t LED_TASK_STACK_BYTES = 2048;
 
 }  // namespace AppConfig

@@ -2,6 +2,14 @@
 
 #include <Arduino.h>
 #include <ArduinoOTA.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <Preferences.h>
+#include <PubSubClient.h>
+#include <Update.h>
+#include <WiFi.h>
+#include <esp_ota_ops.h>
+#include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
@@ -9,8 +17,256 @@
 #include "app_config.h"
 #include "app_events.h"
 #include "app_log.h"
+#include "app_version.h"
 
 namespace {
+
+struct OtaRequest {
+  char version[64] = {};
+  char url[320] = {};
+  char md5[33] = {};
+  bool pending = false;
+};
+
+WiFiClient mqttNetworkClient;
+PubSubClient mqttClient(mqttNetworkClient);
+OtaRequest queuedOtaRequest;
+
+IPAddress otaServerAddress() {
+  return IPAddress(
+      AppConfig::OTA_SERVER_IP[0], AppConfig::OTA_SERVER_IP[1],
+      AppConfig::OTA_SERVER_IP[2], AppConfig::OTA_SERVER_IP[3]);
+}
+
+bool isRunningImagePendingVerify() {
+  const esp_partition_t* running = esp_ota_get_running_partition();
+  if (running == nullptr) {
+    return false;
+  }
+
+  esp_ota_img_states_t state;
+  return esp_ota_get_state_partition(running, &state) == ESP_OK &&
+         state == ESP_OTA_IMG_PENDING_VERIFY;
+}
+
+bool markRunningImageValidIfPending() {
+  if (!isRunningImagePendingVerify()) {
+    return true;
+  }
+
+  const esp_err_t result = esp_ota_mark_app_valid_cancel_rollback();
+  if (result == ESP_OK) {
+    appLog("Firmware baru lolos verifikasi WiFi dan MQTT.");
+    return true;
+  }
+
+  appLogf("Gagal mengesahkan firmware OTA, error: %d", static_cast<int>(result));
+  return false;
+}
+
+void recordBootedVersion() {
+  Preferences preferences;
+  if (!preferences.begin("ota-state", false)) {
+    appLog("NVS OTA tidak dapat dibuka untuk memeriksa versi sebelumnya.");
+    return;
+  }
+
+  const String pendingVersion = preferences.getString("pending", "");
+  if (pendingVersion.length() > 0 && pendingVersion != APP_VERSION) {
+    preferences.putString("failed", pendingVersion);
+    preferences.remove("pending");
+    appLogf("Rilis OTA %s gagal boot dan ditandai agar tidak dicoba ulang.",
+            pendingVersion.c_str());
+  }
+  preferences.end();
+}
+
+bool isVersionMarkedFailed(const char* version) {
+  Preferences preferences;
+  if (!preferences.begin("ota-state", true)) {
+    return false;
+  }
+
+  const String failedVersion = preferences.getString("failed", "");
+  preferences.end();
+  return failedVersion == version;
+}
+
+void savePendingVersion(const char* version) {
+  Preferences preferences;
+  if (!preferences.begin("ota-state", false)) {
+    appLog("NVS OTA tidak dapat dibuka untuk menyimpan versi target.");
+    return;
+  }
+
+  preferences.putString("pending", version);
+  preferences.end();
+}
+
+void clearPendingVersion(const char* version) {
+  Preferences preferences;
+  if (!preferences.begin("ota-state", false)) {
+    return;
+  }
+
+  if (preferences.getString("pending", "") == version) {
+    preferences.remove("pending");
+  }
+  preferences.end();
+}
+
+bool isAllowedFirmwareUrl(const char* url) {
+  char expectedPrefix[96];
+  snprintf(expectedPrefix, sizeof(expectedPrefix), "http://%u.%u.%u.%u:%u/download/",
+           static_cast<unsigned int>(AppConfig::OTA_SERVER_IP[0]),
+           static_cast<unsigned int>(AppConfig::OTA_SERVER_IP[1]),
+           static_cast<unsigned int>(AppConfig::OTA_SERVER_IP[2]),
+           static_cast<unsigned int>(AppConfig::OTA_SERVER_IP[3]),
+           static_cast<unsigned int>(AppConfig::OTA_HTTP_PORT));
+  return strncmp(url, expectedPrefix, strlen(expectedPrefix)) == 0;
+}
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  if (strcmp(topic, AppConfig::MQTT_TOPIC_OTA) != 0) {
+    return;
+  }
+
+  StaticJsonDocument<512> doc;
+  const DeserializationError error = deserializeJson(doc, payload, length);
+  if (error) {
+    appLogf("Pesan MQTT OTA bukan JSON yang valid: %s", error.c_str());
+    return;
+  }
+
+  const char* version = doc["version"] | "";
+  const char* url = doc["url"] | "";
+  const char* md5 = doc["md5"] | "";
+  if (version[0] == '\0' || url[0] == '\0' || strlen(md5) != 32 ||
+      strlen(version) >= sizeof(queuedOtaRequest.version) ||
+      strlen(url) >= sizeof(queuedOtaRequest.url)) {
+    appLog("Pesan MQTT OTA harus berisi version, url, dan MD5 32 karakter.");
+    return;
+  }
+
+  if (strcmp(version, APP_VERSION) == 0) {
+    appLogf("Firmware sudah versi %s.", APP_VERSION);
+    return;
+  }
+
+  if (isVersionMarkedFailed(version)) {
+    appLogf("Rilis %s sebelumnya gagal boot; OTA otomatis dilewati.", version);
+    return;
+  }
+
+  if (!isAllowedFirmwareUrl(url)) {
+    appLog("URL OTA ditolak; URL harus berasal dari server lokal yang dikonfigurasi.");
+    return;
+  }
+
+  strlcpy(queuedOtaRequest.version, version, sizeof(queuedOtaRequest.version));
+  strlcpy(queuedOtaRequest.url, url, sizeof(queuedOtaRequest.url));
+  strlcpy(queuedOtaRequest.md5, md5, sizeof(queuedOtaRequest.md5));
+  queuedOtaRequest.pending = true;
+  appLogf("Rilis OTA %s diterima; unduhan akan dimulai.", version);
+}
+
+bool connectMqtt() {
+  char clientId[64];
+  snprintf(clientId, sizeof(clientId), "%s-%04X", AppConfig::MQTT_CLIENT_ID,
+           static_cast<unsigned int>(ESP.getEfuseMac() & 0xFFFF));
+
+  bool connected = false;
+  if (AppConfig::MQTT_USERNAME[0] == '\0') {
+    connected = mqttClient.connect(clientId);
+  } else {
+    connected = mqttClient.connect(clientId, AppConfig::MQTT_USERNAME,
+                                   AppConfig::MQTT_PASSWORD);
+  }
+
+  if (!connected) {
+    appLogf("Koneksi MQTT gagal, state: %d", mqttClient.state());
+    return false;
+  }
+
+  if (!mqttClient.subscribe(AppConfig::MQTT_TOPIC_OTA, 1)) {
+    appLog("Broker MQTT tersambung, tetapi subscribe topik OTA gagal.");
+    mqttClient.disconnect();
+    return false;
+  }
+
+  appLog("Terhubung ke broker MQTT dan berlangganan topik OTA.");
+  if (markRunningImageValidIfPending()) {
+    clearPendingVersion(APP_VERSION);
+  }
+  mqttClient.publish(AppConfig::MQTT_TOPIC_STATUS, APP_VERSION, true);
+  return true;
+}
+
+bool executeOta(const OtaRequest& request) {
+  if (!isAllowedFirmwareUrl(request.url)) {
+    appLog("URL OTA ditolak; URL harus berasal dari server lokal yang dikonfigurasi.");
+    return false;
+  }
+
+  appLogf("Mengunduh firmware %s dari server lokal.", request.version);
+  HTTPClient http;
+  http.setTimeout(30000);
+  if (!http.begin(request.url)) {
+    appLog("HTTP client gagal membuka URL firmware.");
+    return false;
+  }
+
+  const int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    appLogf("Unduhan firmware gagal, HTTP status: %d", httpCode);
+    http.end();
+    return false;
+  }
+
+  const int contentLength = http.getSize();
+  if (contentLength <= 0) {
+    appLog("Server firmware tidak mengirim Content-Length yang valid.");
+    http.end();
+    return false;
+  }
+
+  if (!Update.begin(static_cast<size_t>(contentLength))) {
+    appLogf("Partisi OTA tidak cukup atau Update.begin gagal: %s",
+            Update.errorString());
+    http.end();
+    return false;
+  }
+
+  if (!Update.setMD5(request.md5)) {
+    appLog("Checksum MD5 dari pesan OTA tidak valid.");
+    Update.abort();
+    http.end();
+    return false;
+  }
+
+  WiFiClient* stream = http.getStreamPtr();
+  const size_t written = Update.writeStream(*stream);
+  if (written != static_cast<size_t>(contentLength)) {
+    appLogf("Firmware terunduh sebagian: %u dari %d byte.",
+            static_cast<unsigned int>(written), contentLength);
+    Update.abort();
+    http.end();
+    return false;
+  }
+
+  if (!Update.end() || !Update.isFinished()) {
+    appLogf("Firmware gagal divalidasi saat Update.end(): %s",
+            Update.errorString());
+    http.end();
+    return false;
+  }
+
+  savePendingVersion(request.version);
+  http.end();
+  appLogf("Firmware %s berhasil ditulis; ESP32 akan restart.", request.version);
+  ESP.restart();
+  return true;
+}
 
 void configureArduinoOta() {
   ArduinoOTA.setHostname(AppConfig::OTA_HOSTNAME);
@@ -68,30 +324,79 @@ void configureArduinoOta() {
   appLog("ArduinoOTA siap menerima upload.");
 }
 
+void configureMqtt() {
+  mqttClient.setServer(AppConfig::MQTT_BROKER_HOST, AppConfig::MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  mqttClient.setBufferSize(512);
+  mqttClient.setKeepAlive(30);
+  mqttClient.setSocketTimeout(5);
+}
+
 void otaTask(void* parameter) {
   (void)parameter;
   bool otaStarted = false;
+  bool mqttConfigured = false;
+  bool pendingVerify = isRunningImagePendingVerify();
+  uint32_t lastMqttAttempt = 0;
+  uint32_t nextOtaAttemptAt = 0;
+  const uint32_t validationStartedAt = millis();
+  recordBootedVersion();
 
   for (;;) {
-    xEventGroupWaitBits(
-        gAppEvents,
-        WIFI_CONNECTED_BIT,
-        pdFALSE,
-        pdTRUE,
-        portMAX_DELAY);
+    const bool wifiConnected =
+        (xEventGroupGetBits(gAppEvents) & WIFI_CONNECTED_BIT) != 0;
 
-    if (!otaStarted) {
-      configureArduinoOta();
-      otaStarted = true;
-    }
+    if (wifiConnected) {
+      if (!otaStarted) {
+        configureArduinoOta();
+        otaStarted = true;
+      }
+      if (!mqttConfigured) {
+        configureMqtt();
+        mqttConfigured = true;
+      }
 
-    while ((xEventGroupGetBits(gAppEvents) & WIFI_CONNECTED_BIT) != 0) {
-      // ArduinoOTA hanya dipanggil dari task ini agar tidak ada pemanggilan bersamaan.
       ArduinoOTA.handle();
-      vTaskDelay(pdMS_TO_TICKS(10));
+      if (mqttClient.connected()) {
+        mqttClient.loop();
+      } else if (millis() - lastMqttAttempt >=
+                 AppConfig::MQTT_RECONNECT_INTERVAL_MS) {
+        lastMqttAttempt = millis();
+        connectMqtt();
+        if (!isRunningImagePendingVerify()) {
+          pendingVerify = false;
+        }
+      }
+
+      if (queuedOtaRequest.pending &&
+          static_cast<int32_t>(millis() - nextOtaAttemptAt) >= 0) {
+        OtaRequest request = queuedOtaRequest;
+        queuedOtaRequest.pending = false;
+        if (!executeOta(request)) {
+          queuedOtaRequest = request;
+          queuedOtaRequest.pending = true;
+          nextOtaAttemptAt = millis() + AppConfig::OTA_RETRY_INTERVAL_MS;
+          appLog("OTA akan dicoba ulang setelah jeda 30 detik.");
+        }
+      }
+    } else if (mqttClient.connected()) {
+      mqttClient.disconnect();
+      appLog("WiFi terputus; koneksi MQTT ditutup sementara.");
     }
 
-    appLog("WiFi terputus; task OTA menunggu koneksi kembali.");
+    if (pendingVerify &&
+        millis() - validationStartedAt >= AppConfig::OTA_VALIDATION_TIMEOUT_MS) {
+      appLog("Verifikasi firmware baru timeout; rollback ke firmware sebelumnya.");
+      const esp_err_t result = esp_ota_mark_app_invalid_rollback_and_reboot();
+      if (result != ESP_OK) {
+        appLogf("Rollback gagal, error: %d; ESP32 akan restart.",
+                static_cast<int>(result));
+      }
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      ESP.restart();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
@@ -107,3 +412,6 @@ bool otaTaskStart() {
              nullptr,
              1) == pdPASS;
 }
+
+// Tunda verifikasi otomatis Arduino-ESP32 sampai WiFi dan MQTT lolos pemeriksaan.
+extern "C" bool verifyRollbackLater() { return true; }

@@ -1,0 +1,72 @@
+name: Build and release ESP32 firmware
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PlatformIO
+        run: python -m pip install platformio
+
+      - name: Set firmware version from tag
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          OTA_MQTT_USERNAME: ${{ secrets.OTA_MQTT_USERNAME }}
+          OTA_MQTT_PASSWORD: ${{ secrets.OTA_MQTT_PASSWORD }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          version = os.environ["RELEASE_VERSION"]
+          if not version.startswith("v") or '"' in version or "\\" in version:
+              raise SystemExit("Release tag must be a safe v-prefixed version")
+          Path("include/app_version.h").write_text(
+              "#pragma once\n#define APP_VERSION \"" + version + "\"\n",
+              encoding="utf-8",
+          )
+          Path("ota_manifest.json").write_text(
+              '{"ota_protocol":1,"version":"' + version + '",'
+              '"board":"esp32doit-devkit-v1"}\n',
+              encoding="utf-8",
+          )
+          Path("include/ota_secrets.h").write_text(
+              "#pragma once\n"
+              "#define OTA_MQTT_USERNAME "
+              + json.dumps(os.environ.get("OTA_MQTT_USERNAME", ""))
+              + "\n#define OTA_MQTT_PASSWORD "
+              + json.dumps(os.environ.get("OTA_MQTT_PASSWORD", ""))
+              + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Build firmware
+        run: pio run -e doit_devkit_v1
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            .pio/build/doit_devkit_v1/firmware.bin
+            ota_manifest.json
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
