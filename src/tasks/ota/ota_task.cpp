@@ -8,6 +8,8 @@
 #include <PubSubClient.h>
 #include <Update.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <esp_system.h>
 #include <esp_ota_ops.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
@@ -28,9 +30,29 @@ struct OtaRequest {
   bool pending = false;
 };
 
-WiFiClient mqttNetworkClient;
+WiFiClientSecure mqttNetworkClient;
 PubSubClient mqttClient(mqttNetworkClient);
 OtaRequest queuedOtaRequest;
+char otaDeviceId[32] = {};
+char otaDeviceTopic[96] = {};
+char mqttStatusTopic[96] = {};
+char mqttDummyTopic[112] = {};
+
+void configureDeviceIdentity() {
+  const uint64_t baseMac = ESP.getEfuseMac() & 0xFFFFFFFFFFFFULL;
+  snprintf(otaDeviceId, sizeof(otaDeviceId), "%s%012llx",
+           AppConfig::OTA_DEVICE_ID_PREFIX,
+           static_cast<unsigned long long>(baseMac));
+  snprintf(otaDeviceTopic, sizeof(otaDeviceTopic), "%s%s",
+           AppConfig::MQTT_TOPIC_OTA_DEVICE_PREFIX, otaDeviceId);
+  snprintf(mqttStatusTopic, sizeof(mqttStatusTopic), "%s%s",
+           AppConfig::MQTT_TOPIC_STATUS_PREFIX, otaDeviceId);
+  snprintf(mqttDummyTopic, sizeof(mqttDummyTopic), "%s%s%s",
+           AppConfig::MQTT_TOPIC_DUMMY_PREFIX, otaDeviceId,
+           AppConfig::MQTT_TOPIC_DUMMY_SUFFIX);
+  appLogf("ESP device ID: %s", otaDeviceId);
+  appLogf("MQTT OTA topic: %s", otaDeviceTopic);
+}
 
 IPAddress otaServerAddress() {
   return IPAddress(
@@ -71,7 +93,10 @@ void recordBootedVersion() {
     return;
   }
 
-  const String pendingVersion = preferences.getString("pending", "");
+  String pendingVersion;
+  if (preferences.isKey("pending")) {
+    pendingVersion = preferences.getString("pending", "");
+  }
   if (pendingVersion.length() > 0 && pendingVersion != APP_VERSION) {
     preferences.putString("failed", pendingVersion);
     preferences.remove("pending");
@@ -87,7 +112,10 @@ bool isVersionMarkedFailed(const char* version) {
     return false;
   }
 
-  const String failedVersion = preferences.getString("failed", "");
+  String failedVersion;
+  if (preferences.isKey("failed")) {
+    failedVersion = preferences.getString("failed", "");
+  }
   preferences.end();
   return failedVersion == version;
 }
@@ -109,7 +137,8 @@ void clearPendingVersion(const char* version) {
     return;
   }
 
-  if (preferences.getString("pending", "") == version) {
+  if (preferences.isKey("pending") &&
+      preferences.getString("pending", "") == version) {
     preferences.remove("pending");
   }
   preferences.end();
@@ -127,7 +156,8 @@ bool isAllowedFirmwareUrl(const char* url) {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  if (strcmp(topic, AppConfig::MQTT_TOPIC_OTA) != 0) {
+  if (strcmp(topic, AppConfig::MQTT_TOPIC_OTA_BROADCAST) != 0 &&
+      strcmp(topic, otaDeviceTopic) != 0) {
     return;
   }
 
@@ -141,6 +171,15 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   const char* version = doc["version"] | "";
   const char* url = doc["url"] | "";
   const char* md5 = doc["md5"] | "";
+  const char* targetDeviceId = doc["target_device_id"] | "";
+
+  if (targetDeviceId[0] != '\0' && strcmp(targetDeviceId, "*") != 0 &&
+      strcmp(targetDeviceId, otaDeviceId) != 0) {
+    appLogf("OTA untuk perangkat %s; ESP ini (%s) melewati pesan.",
+            targetDeviceId, otaDeviceId);
+    return;
+  }
+
   if (version[0] == '\0' || url[0] == '\0' || strlen(md5) != 32 ||
       strlen(version) >= sizeof(queuedOtaRequest.version) ||
       strlen(url) >= sizeof(queuedOtaRequest.url)) {
@@ -171,35 +210,51 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 }
 
 bool connectMqtt() {
-  char clientId[64];
-  snprintf(clientId, sizeof(clientId), "%s-%04X", AppConfig::MQTT_CLIENT_ID,
-           static_cast<unsigned int>(ESP.getEfuseMac() & 0xFFFF));
-
   bool connected = false;
   if (AppConfig::MQTT_USERNAME[0] == '\0') {
-    connected = mqttClient.connect(clientId);
+    connected = mqttClient.connect(otaDeviceId);
   } else {
-    connected = mqttClient.connect(clientId, AppConfig::MQTT_USERNAME,
+    connected = mqttClient.connect(otaDeviceId, AppConfig::MQTT_USERNAME,
                                    AppConfig::MQTT_PASSWORD);
   }
 
   if (!connected) {
-    appLogf("Koneksi MQTT gagal, state: %d", mqttClient.state());
+    appLogf("Koneksi MQTT ke %s:%u gagal, state: %d",
+            AppConfig::MQTT_BROKER_HOST,
+            static_cast<unsigned int>(AppConfig::MQTT_PORT),
+            mqttClient.state());
     return false;
   }
 
-  if (!mqttClient.subscribe(AppConfig::MQTT_TOPIC_OTA, 1)) {
-    appLog("Broker MQTT tersambung, tetapi subscribe topik OTA gagal.");
+  if (!mqttClient.subscribe(otaDeviceTopic, 1)) {
+    appLogf("Subscribe topik OTA perangkat gagal: %s", otaDeviceTopic);
     mqttClient.disconnect();
     return false;
   }
+  if (!mqttClient.subscribe(AppConfig::MQTT_TOPIC_OTA_BROADCAST, 1)) {
+    appLog("Subscribe topic OTA broadcast gagal; topic perangkat tetap aktif.");
+  }
 
-  appLog("Terhubung ke broker MQTT dan berlangganan topik OTA.");
+  appLogf("Terhubung ke broker; ID=%s, OTA topic=%s",
+          otaDeviceId, otaDeviceTopic);
   if (markRunningImageValidIfPending()) {
     clearPendingVersion(APP_VERSION);
   }
-  mqttClient.publish(AppConfig::MQTT_TOPIC_STATUS, APP_VERSION, true);
+  mqttClient.publish(mqttStatusTopic, APP_VERSION, true);
   return true;
+}
+
+void publishDummyValue() {
+  const uint32_t value = esp_random() % 101U;
+  char payload[4];
+  snprintf(payload, sizeof(payload), "%u", static_cast<unsigned int>(value));
+
+  if (mqttClient.publish(mqttDummyTopic, payload, false)) {
+    appLogf("Dummy MQTT terkirim: %s = %s",
+            mqttDummyTopic, payload);
+  } else {
+    appLog("Publish angka dummy ke MQTT gagal.");
+  }
 }
 
 bool executeOta(const OtaRequest& request) {
@@ -324,20 +379,30 @@ void configureArduinoOta() {
   appLog("ArduinoOTA siap menerima upload.");
 }
 
-void configureMqtt() {
+bool configureMqtt() {
+  if (AppConfig::MQTT_ROOT_CA_CERT[0] == '\0') {
+    appLog("MQTT TLS belum siap: CA broker belum dikonfigurasi.");
+    return false;
+  }
+
+  mqttNetworkClient.setCACert(AppConfig::MQTT_ROOT_CA_CERT);
   mqttClient.setServer(AppConfig::MQTT_BROKER_HOST, AppConfig::MQTT_PORT);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setBufferSize(512);
   mqttClient.setKeepAlive(30);
   mqttClient.setSocketTimeout(5);
+  return true;
 }
 
 void otaTask(void* parameter) {
   (void)parameter;
+  configureDeviceIdentity();
   bool otaStarted = false;
   bool mqttConfigured = false;
+  bool mqttConfigurationChecked = false;
   bool pendingVerify = isRunningImagePendingVerify();
   uint32_t lastMqttAttempt = 0;
+  uint32_t lastDummyPublishAt = 0;
   uint32_t nextOtaAttemptAt = 0;
   const uint32_t validationStartedAt = millis();
   recordBootedVersion();
@@ -351,20 +416,29 @@ void otaTask(void* parameter) {
         configureArduinoOta();
         otaStarted = true;
       }
-      if (!mqttConfigured) {
-        configureMqtt();
-        mqttConfigured = true;
+      if (!mqttConfigurationChecked) {
+        mqttConfigured = configureMqtt();
+        mqttConfigurationChecked = true;
       }
 
       ArduinoOTA.handle();
-      if (mqttClient.connected()) {
-        mqttClient.loop();
-      } else if (millis() - lastMqttAttempt >=
-                 AppConfig::MQTT_RECONNECT_INTERVAL_MS) {
-        lastMqttAttempt = millis();
-        connectMqtt();
-        if (!isRunningImagePendingVerify()) {
-          pendingVerify = false;
+      if (mqttConfigured) {
+        if (mqttClient.connected()) {
+          mqttClient.loop();
+          if (millis() - lastDummyPublishAt >=
+              AppConfig::MQTT_DUMMY_PUBLISH_INTERVAL_MS) {
+            lastDummyPublishAt = millis();
+            publishDummyValue();
+          }
+        } else if (millis() - lastMqttAttempt >=
+                   AppConfig::MQTT_RECONNECT_INTERVAL_MS) {
+          lastMqttAttempt = millis();
+          if (connectMqtt()) {
+            lastDummyPublishAt = millis();
+          }
+          if (!isRunningImagePendingVerify()) {
+            pendingVerify = false;
+          }
         }
       }
 

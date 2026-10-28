@@ -17,7 +17,7 @@ The local server and ESP32 must be on the same reachable LAN. GitHub must be rea
 - `mosquitto.conf.example`: LAN-only prototype broker configuration.
 - `src/tasks/ota/ota_task.cpp`: ArduinoOTA fallback plus MQTT/HTTP update receiver.
 - `include/app_version.h`: local builds use `dev`; GitHub builds replace this with the Release tag.
-- `include/ota_secrets.h.example`: template for optional MQTT credentials; the real `ota_secrets.h` is ignored by Git.
+- `include/ota_secrets.h.example`: template for MQTT host, credentials, and the broker CA certificate; the real `ota_secrets.h` is ignored by Git.
 
 ## Configure the LAN
 
@@ -25,40 +25,27 @@ The laptop/server is configured at `192.168.211.251`, with gateway `192.168.211.
 
 `OTA_SERVER_IP` in `include/app_config.h` and the server environment variable below are set to `192.168.211.251` to match the laptop's static address.
 
-The broker address is a separate setting: `MQTT_BROKER_HOST` in `include/app_config.h`. It defaults to `192.168.211.251` for Mosquitto running on this laptop. For a hosted broker, set it to the broker's hostname and port; the Python server must use the same broker endpoint. The ESP32 still needs `OTA_SERVER_IP` because firmware binaries are served by the local laptop over HTTP.
+MQTT uses TLS on port `8883`. The broker host must be reachable from the ESP32 and match a name or IP address in the broker certificate's Subject Alternative Name (SAN). For a laptop broker, `localhost` is not usable by the ESP32; use `192.168.211.251` only if the certificate includes that IP. For a hosted broker, use its hostname. The Python server and firmware must use the same broker endpoint. The ESP32 still needs `OTA_SERVER_IP` because firmware binaries are served by the local laptop over HTTP.
 
-For a local broker, allow inbound TCP ports `1883` (MQTT) and `5000` (firmware download) through the computer's firewall on the private LAN. For a hosted broker, the laptop and ESP32 need outbound access to that broker, while port `5000` must still be reachable from the ESP32. The sample Mosquitto configuration allows anonymous MQTT clients, so use it only on a trusted private network and do not forward it to the internet.
+For a local broker, allow inbound TCP ports `8883` (MQTT/TLS) and `5000` (firmware download) through the computer's firewall on the private LAN. The `mosquitto.conf.example` file is a TLS listener template; replace its certificate paths and ensure its server certificate contains the broker host/IP SAN. For a hosted broker, the laptop and ESP32 need outbound access to that broker, while port `5000` must still be reachable from the ESP32.
 
-If the broker requires a username and password, copy `include/ota_secrets.h.example` to `include/ota_secrets.h` and enter the credentials there for a local build. The real file is excluded from Git. Add GitHub Actions repository secrets named `OTA_MQTT_USERNAME` and `OTA_MQTT_PASSWORD` so Release builds contain the same credentials. Set matching PowerShell environment variables `OTA_MQTT_USERNAME` and `OTA_MQTT_PASSWORD` for `ota_server.py`. If the broker is anonymous, leave all four values empty. The current ESP32 client uses plain MQTT over TCP; a broker that requires TLS/port 8883 needs an additional TLS configuration.
+Copy `include/ota_secrets.h.example` to `include/ota_secrets.h` for a local firmware build. Set `OTA_MQTT_HOST`, username, and password, then paste the broker's CA PEM into `OTA_MQTT_ROOT_CA` and set `OTA_MQTT_ROOT_CA_DEFINED` to `1`. Keep the CA PEM intact, including its BEGIN/END lines. The ESP32 validates the broker certificate and refuses MQTT connections if the CA is missing or invalid. The real file is excluded from Git. For GitHub Releases, add repository secrets named `OTA_MQTT_HOST` (optional; defaults to the laptop IP), `OTA_MQTT_USERNAME`, `OTA_MQTT_PASSWORD`, and `OTA_MQTT_ROOT_CA_CERT`; the release workflow requires the CA secret. For the Python server, set `OTA_MQTT_HOST`, `OTA_MQTT_PORT=8883`, `OTA_MQTT_TLS=true`, credentials, and optionally `OTA_MQTT_CA_CERT` to a CA PEM file path when the CA is not in the system trust store.
 
 ## Start Mosquitto on Windows
 
-Install Mosquitto, then open a PowerShell window in this project folder and run:
+Install Mosquitto, update the certificate paths in `mosquitto.conf.example`, then open a PowerShell window in this project folder and run:
 
 ```powershell
 mosquitto -c .\mosquitto.conf.example -v
 ```
 
-Keep this window open. If `mosquitto` is not recognized, run `mosquitto.exe` using its installation path.
-If the Mosquitto Windows service is already using port `1883`, stop that service or configure the service to use this file instead; do not start a second broker on the same port.
+Keep this window open. The certificate must be valid for the host the ESP32 uses (normally `192.168.211.251`). If `mosquitto` is not recognized, run `mosquitto.exe` using its installation path. If another Mosquitto service is already using port `8883`, stop it or configure it to use this file instead.
 
-## Publish dummy MQTT values
+## ESP32 dummy MQTT values
 
-This optional publisher sends a random integer to `gateway/dummy/value` every five seconds. In MQTT Explorer, connect to the same broker and subscribe to that topic. MQTT topics do not need to be created in advance; they appear when the first message is published.
+The ESP32 derives a stable ID from its 48-bit MAC and prints it in Serial Monitor, for example `esp32-ota-14335c524234`. Its status topic is `gateway/status/<device-id>`, its dummy value topic is `gateway/dummy/<device-id>/random`, and its device-specific OTA topic is `gateway/ota/update/<device-id>`. It also listens to the shared `gateway/ota/update` topic for broadcast announcements. In MQTT Explorer, expand `gateway` to see the topics for each device.
 
-Install the project dependencies once, then configure the connection in PowerShell to match MQTT Explorer. For the local Mosquitto example above:
-
-```powershell
-python -m pip install -r requirements.txt
-$env:OTA_MQTT_HOST = "127.0.0.1"
-$env:OTA_MQTT_PORT = "1883"
-$env:OTA_MQTT_TLS = "false"
-$env:OTA_MQTT_USERNAME = ""
-$env:OTA_MQTT_PASSWORD = ""
-python .\mqtt_dummy_publisher.py
-```
-
-For the selected MQTT Explorer connection in the screenshot (`localhost`, port `8883`, TLS enabled), use `127.0.0.1`, port `8883`, and set `$env:OTA_MQTT_TLS = "true"`. If that broker requires login, set the same username and password in the two PowerShell variables. If you use `test.mosquitto.org`, set the host to `test.mosquitto.org`, port to `1883`, and TLS to `false`. The laptop's `192.168.2.4` address is only needed by other devices, such as the ESP32, to reach a broker/server running on this laptop; a script running on the laptop itself can use `127.0.0.1`.
+Use `OTA_DEVICE_REPOS` to map each ESP32 ID printed by its Serial Monitor to that device's GitHub repository. The server checks each repository's latest GitHub Release independently and publishes its `firmware.bin` only to that device's OTA topic. Do not map a device to a repository whose firmware has a different board, network, or partition configuration. Firmware that only listens to the shared topic must be migrated over USB before it can receive a per-device announcement. Restart the Python server after changing the mapping. The default GitHub check interval is five minutes; this checks Releases, not every commit pushed to a branch.
 
 ## Start the local OTA server
 
@@ -68,20 +55,23 @@ Open a second PowerShell window in the project folder:
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
-$env:OTA_GITHUB_REPO = "ahmadfirmanALV/ESP-OTA2"
 $env:OTA_SERVER_IP = "192.168.211.251"
-$env:OTA_MQTT_HOST = "127.0.0.1"
+$env:OTA_MQTT_HOST = "192.168.211.251"
+$env:OTA_MQTT_PORT = "8883"
+$env:OTA_MQTT_TLS = "true"
+$env:OTA_MQTT_CA_CERT = "C:\Program Files\Mosquitto\certs\ca.crt"
 # For an authenticated broker, set these too; omit/leave empty for anonymous Mosquitto.
 $env:OTA_MQTT_USERNAME = ""
 $env:OTA_MQTT_PASSWORD = ""
+$env:OTA_DEVICE_REPOS = "esp32-ota-14335c524234=ahmadfirmanALV/ESP-OTA;esp32-ota-082c8e215788=ahmadfirmanALV/ESP-OTA2"
 python .\ota_server.py
 ```
 
-Change the example IP to the server address configured above. For an external broker, set `OTA_MQTT_HOST` to its hostname instead of `127.0.0.1`. Leave this server running. The health endpoint should respond at `http://<server-ip>:5000/health`.
+Change the example certificate path if needed. For an external broker, use its hostname and CA certificate settings. Each mapped repository must have a latest GitHub Release containing `firmware.bin` and `ota_manifest.json`; each ESP32 must receive firmware built for its own configuration. Leave this server running. The health endpoint at `http://<server-ip>:5000/health` lists the configured repo-to-device mappings.
 
 ## Flash the ESP32 the first time
 
-The firmware currently on the ESP32 does not understand MQTT OTA. Install this updated firmware once over USB before expecting server updates. The partition table has changed, so erase the ESP32 flash once before the first upload; this also clears saved Wi-Fi credentials, which you will need to enter again through the `ESP32-Setup` Wi-Fi portal.
+Upload the migration firmware once over USB because firmware that only subscribes to the shared OTA topic cannot receive a per-device topic. If this is also the first time applying the custom partition table, erase flash once before upload; this clears saved Wi-Fi credentials, which you will need to enter again through the `ESP32-Setup` Wi-Fi portal.
 
 From the project folder, using the correct COM port:
 

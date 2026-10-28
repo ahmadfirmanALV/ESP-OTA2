@@ -1,4 +1,7 @@
-# Contoh untuk prototipe di LAN tepercaya saja.
-# Jangan port-forward port 1883 ke internet.
-listener 1883
+# Template broker TLS lokal. Ganti path sertifikat sesuai lokasi file di laptop.
+# Sertifikat server harus mencantumkan 192.168.211.251 (atau nama host broker)
+# sebagai Subject Alternative Name agar validasi sertifikat ESP32 berhasil.
+listener 8883
+certfile C:/Program Files/Mosquitto/certs/server.crt
+keyfile C:/Program Files/Mosquitto/certs/server.key
 allow_anonymous true

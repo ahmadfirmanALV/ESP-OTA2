@@ -26,8 +26,10 @@ jobs:
       - name: Set firmware version from tag
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
+          OTA_MQTT_HOST: ${{ secrets.OTA_MQTT_HOST }}
           OTA_MQTT_USERNAME: ${{ secrets.OTA_MQTT_USERNAME }}
           OTA_MQTT_PASSWORD: ${{ secrets.OTA_MQTT_PASSWORD }}
+          OTA_MQTT_ROOT_CA_CERT: ${{ secrets.OTA_MQTT_ROOT_CA_CERT }}
         run: |
           python - <<'PY'
           import json
@@ -37,6 +39,12 @@ jobs:
           version = os.environ["RELEASE_VERSION"]
           if not version.startswith("v") or '"' in version or "\\" in version:
               raise SystemExit("Release tag must be a safe v-prefixed version")
+          ca_cert = os.environ.get("OTA_MQTT_ROOT_CA_CERT", "").strip()
+          if not ca_cert.startswith("-----BEGIN CERTIFICATE-----") or not ca_cert.endswith("-----END CERTIFICATE-----"):
+              raise SystemExit("Set the GitHub Actions secret OTA_MQTT_ROOT_CA_CERT to the broker CA PEM")
+          if ')OTA_CA"' in ca_cert:
+              raise SystemExit("Broker CA PEM contains the reserved OTA_CA raw-string delimiter")
+          broker_host = os.environ.get("OTA_MQTT_HOST") or "192.168.211.251"
           Path("include/app_version.h").write_text(
               "#pragma once\n#define APP_VERSION \"" + version + "\"\n",
               encoding="utf-8",
@@ -46,15 +54,19 @@ jobs:
               '"board":"esp32doit-devkit-v1"}\n',
               encoding="utf-8",
           )
-          Path("include/ota_secrets.h").write_text(
-              "#pragma once\n"
-              "#define OTA_MQTT_USERNAME "
-              + json.dumps(os.environ.get("OTA_MQTT_USERNAME", ""))
-              + "\n#define OTA_MQTT_PASSWORD "
-              + json.dumps(os.environ.get("OTA_MQTT_PASSWORD", ""))
-              + "\n",
-              encoding="utf-8",
+          secrets_header = "\n".join([
+              "#pragma once",
+              "#define OTA_MQTT_HOST " + json.dumps(broker_host),
+              "#define OTA_MQTT_USERNAME " + json.dumps(os.environ.get("OTA_MQTT_USERNAME", "")),
+              "#define OTA_MQTT_PASSWORD " + json.dumps(os.environ.get("OTA_MQTT_PASSWORD", "")),
+              "#define OTA_MQTT_ROOT_CA_DEFINED 1",
+          ]) + "\n"
+          secrets_header += (
+              'static const char OTA_MQTT_ROOT_CA[] = R"OTA_CA('
+              + ca_cert
+              + ')OTA_CA";\n'
           )
+          Path("include/ota_secrets.h").write_text(secrets_header, encoding="utf-8")
           PY
 
       - name: Build firmware
