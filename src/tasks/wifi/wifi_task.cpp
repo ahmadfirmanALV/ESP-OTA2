@@ -9,10 +9,11 @@
 #include "app_config.h"
 #include "app_events.h"
 #include "app_log.h"
+#include "task_watchdog.h"
 
 namespace {
 
-void connectWithWifiManager() {
+bool connectWithWifiManager() {
   WiFiManager wifiManager;
   wifiManager.setConfigPortalTimeout(AppConfig::WIFI_PORTAL_TIMEOUT_SECONDS);
 
@@ -51,7 +52,7 @@ void connectWithWifiManager() {
     appLog("Koneksi WiFi gagal atau portal timeout; ESP32 akan restart.");
     vTaskDelay(pdMS_TO_TICKS(1000));
     ESP.restart();
-    return;
+    return false;
   }
 
   const String ssid = WiFi.SSID();
@@ -62,10 +63,12 @@ void connectWithWifiManager() {
   appLogf("IP address: %s", ipAddress.c_str());
   appLogf("Gateway: %s", gatewayAddress.c_str());
   appLogf("Subnet mask: %s", subnetMask.c_str());
+  return true;
 }
 
 void wifiTask(void* parameter) {
   (void)parameter;
+  taskWatchdogHeartbeat(WatchedComponent::Wifi);
 
   WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
     (void)info;
@@ -79,22 +82,52 @@ void wifiTask(void* parameter) {
 
   WiFi.setHostname(AppConfig::OTA_HOSTNAME);
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
 
-  connectWithWifiManager();
+  if (!connectWithWifiManager()) {
+    taskWatchdogUnregister(WatchedComponent::Wifi);
+    vTaskDelete(nullptr);
+    return;
+  }
 
-  // WiFiManager sudah keluar dari scope; callback jaringan tetap mengatur event group.
-  vTaskDelete(nullptr);
+  // Keep the Wi-Fi component alive to supervise and retry a dropped connection.
+  uint32_t lastReconnectAt = millis();
+  for (;;) {
+    const uint32_t now = millis();
+    const wl_status_t wifiStatus = WiFi.status();
+    const bool connected = wifiStatus == WL_CONNECTED;
+    setWifiConnected(connected);
+
+    if (connected) {
+      lastReconnectAt = now;
+    } else if (wifiStatus != WL_IDLE_STATUS &&
+               now - lastReconnectAt >= AppConfig::WIFI_RECONNECT_INTERVAL_MS) {
+      lastReconnectAt = now;
+      appLog("Wi-Fi terputus; mencoba menyambungkan kembali.");
+      WiFi.reconnect();
+    }
+
+    taskWatchdogHeartbeat(WatchedComponent::Wifi);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  }
 }
 
 }  // namespace
 
 bool wifiTaskStart() {
-  return xTaskCreatePinnedToCore(
-             wifiTask,
-             "wifi_task",
-             AppConfig::WIFI_TASK_STACK_BYTES,
-             nullptr,
-             2,
-             nullptr,
-             0) == pdPASS;
+  taskWatchdogRegister(WatchedComponent::Wifi,
+                       AppConfig::WIFI_TASK_WATCHDOG_TIMEOUT_MS);
+  const BaseType_t result = xTaskCreatePinnedToCore(
+      wifiTask,
+      "wifi_task",
+      AppConfig::WIFI_TASK_STACK_BYTES,
+      nullptr,
+      2,
+      nullptr,
+      0);
+  if (result != pdPASS) {
+    taskWatchdogUnregister(WatchedComponent::Wifi);
+    return false;
+  }
+  return true;
 }

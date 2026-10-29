@@ -20,6 +20,7 @@ MQTT_PASSWORD = os.getenv("OTA_MQTT_PASSWORD", "")
 MQTT_TLS = os.getenv("OTA_MQTT_TLS", "true").strip().lower() in {"1", "true", "yes", "on"}
 MQTT_CA_CERT = os.getenv("OTA_MQTT_CA_CERT") or None
 MQTT_TOPIC_OTA = "gateway/ota/update"
+MQTT_TOPIC_VERSION_LATEST = "gateway/version/latest"
 DEFAULT_GITHUB_REPO = os.getenv("OTA_GITHUB_REPO", "ahmadfirmanALV/ESP-OTA2").strip()
 DEVICE_REPOS_TEXT = os.getenv("OTA_DEVICE_REPOS", "").strip()
 LEGACY_TARGET_TEXT = os.getenv("OTA_TARGET_DEVICE_IDS", "").strip()
@@ -91,17 +92,35 @@ def make_mqtt_client():
     return client
 
 
-def publish_update(payload, device_id):
+def publish_update(payload, device_id, version):
     client = make_mqtt_client()
     client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
     client.loop_start()
     try:
-        topic = f"{MQTT_TOPIC_OTA}/{device_id}" if device_id else MQTT_TOPIC_OTA
-        result = client.publish(topic, payload, qos=1, retain=True)
-        result.wait_for_publish(timeout=15)
-        if result.rc != mqtt.MQTT_ERR_SUCCESS or not result.is_published():
-            raise RuntimeError(f"MQTT publish gagal ke {topic}, rc={result.rc}")
-        logger.info("Pengumuman OTA dikirim ke topic %s.", topic)
+        update_topic = f"{MQTT_TOPIC_OTA}/{device_id}" if device_id else MQTT_TOPIC_OTA
+        version_topic = (
+            f"{MQTT_TOPIC_VERSION_LATEST}/{device_id}"
+            if device_id
+            else MQTT_TOPIC_VERSION_LATEST
+        )
+        # A broker ACL may allow OTA announcements but deny the informational
+        # version topic. Keep those publications independent so version reporting
+        # cannot prevent a firmware update from being announced.
+        for topic, message, required in (
+            (update_topic, payload, True),
+            (version_topic, version, False),
+        ):
+            try:
+                result = client.publish(topic, message, qos=1, retain=True)
+                result.wait_for_publish(timeout=15)
+                if result.rc != mqtt.MQTT_ERR_SUCCESS or not result.is_published():
+                    raise RuntimeError(f"MQTT publish gagal ke {topic}, rc={result.rc}")
+            except Exception:
+                if required:
+                    raise
+                logger.exception("Gagal mempublikasikan versi terbaru ke %s.", topic)
+                continue
+            logger.info("Pesan OTA dipublikasikan ke topic %s.", topic)
     finally:
         client.disconnect()
         client.loop_stop()
@@ -171,7 +190,11 @@ def process_latest_release(device_id, repo):
         logger.info("Rilis %s dari %s disimpan sebagai %s.", tag_name, repo, filename)
 
     # Re-publish retained state so an offline ESP32 can receive it after reconnecting.
-    publish_update(json.dumps(state["payload"], separators=(",", ":")), device_id)
+    publish_update(
+        json.dumps(state["payload"], separators=(",", ":")),
+        device_id,
+        tag_name,
+    )
     logger.info("Rilis %s dari %s diumumkan untuk %s.", tag_name, repo, device_id or "broadcast")
 
 

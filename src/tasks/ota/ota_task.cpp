@@ -20,6 +20,7 @@
 #include "app_events.h"
 #include "app_log.h"
 #include "app_version.h"
+#include "task_watchdog.h"
 
 namespace {
 
@@ -36,6 +37,7 @@ OtaRequest queuedOtaRequest;
 char otaDeviceId[32] = {};
 char otaDeviceTopic[96] = {};
 char mqttStatusTopic[96] = {};
+char mqttCurrentVersionTopic[112] = {};
 char mqttDummyTopic[112] = {};
 
 void configureDeviceIdentity() {
@@ -47,6 +49,8 @@ void configureDeviceIdentity() {
            AppConfig::MQTT_TOPIC_OTA_DEVICE_PREFIX, otaDeviceId);
   snprintf(mqttStatusTopic, sizeof(mqttStatusTopic), "%s%s",
            AppConfig::MQTT_TOPIC_STATUS_PREFIX, otaDeviceId);
+  snprintf(mqttCurrentVersionTopic, sizeof(mqttCurrentVersionTopic), "%s%s",
+           AppConfig::MQTT_TOPIC_VERSION_CURRENT_PREFIX, otaDeviceId);
   snprintf(mqttDummyTopic, sizeof(mqttDummyTopic), "%s%s%s",
            AppConfig::MQTT_TOPIC_DUMMY_PREFIX, otaDeviceId,
            AppConfig::MQTT_TOPIC_DUMMY_SUFFIX);
@@ -241,6 +245,12 @@ bool connectMqtt() {
     clearPendingVersion(APP_VERSION);
   }
   mqttClient.publish(mqttStatusTopic, APP_VERSION, true);
+  if (!mqttClient.publish(mqttCurrentVersionTopic, APP_VERSION, true)) {
+    appLogf("Gagal mengirim versi aktif ke topic %s.", mqttCurrentVersionTopic);
+  } else {
+    appLogf("Versi firmware aktif: %s = %s",
+            mqttCurrentVersionTopic, APP_VERSION);
+  }
   return true;
 }
 
@@ -470,6 +480,7 @@ void otaTask(void* parameter) {
       ESP.restart();
     }
 
+    taskWatchdogHeartbeat(WatchedComponent::Ota);
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
@@ -477,14 +488,21 @@ void otaTask(void* parameter) {
 }  // namespace
 
 bool otaTaskStart() {
-  return xTaskCreatePinnedToCore(
-             otaTask,
-             "ota_task",
-             AppConfig::OTA_TASK_STACK_BYTES,
-             nullptr,
-             2,
-             nullptr,
-             1) == pdPASS;
+  taskWatchdogRegister(WatchedComponent::Ota,
+                       AppConfig::OTA_TASK_WATCHDOG_TIMEOUT_MS);
+  const BaseType_t result = xTaskCreatePinnedToCore(
+      otaTask,
+      "ota_task",
+      AppConfig::OTA_TASK_STACK_BYTES,
+      nullptr,
+      2,
+      nullptr,
+      1);
+  if (result != pdPASS) {
+    taskWatchdogUnregister(WatchedComponent::Ota);
+    return false;
+  }
+  return true;
 }
 
 // Tunda verifikasi otomatis Arduino-ESP32 sampai WiFi dan MQTT lolos pemeriksaan.

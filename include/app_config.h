@@ -55,6 +55,7 @@ constexpr uint16_t OTA_HTTP_PORT = 5000;
 constexpr char MQTT_TOPIC_OTA_BROADCAST[] = "gateway/ota/update";
 constexpr char MQTT_TOPIC_OTA_DEVICE_PREFIX[] = "gateway/ota/update/";
 constexpr char MQTT_TOPIC_STATUS_PREFIX[] = "gateway/status/";
+constexpr char MQTT_TOPIC_VERSION_CURRENT_PREFIX[] = "gateway/version/current/";
 constexpr char MQTT_TOPIC_DUMMY_PREFIX[] = "gateway/dummy/";
 constexpr char MQTT_TOPIC_DUMMY_SUFFIX[] = "/random";
 constexpr char MQTT_USERNAME[] = OTA_MQTT_USERNAME;
@@ -65,9 +66,21 @@ constexpr const char* MQTT_ROOT_CA_CERT = OTA_MQTT_ROOT_CA;
 constexpr const char* MQTT_ROOT_CA_CERT = "";
 #endif
 constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
+constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000;
 constexpr uint32_t MQTT_DUMMY_PUBLISH_INTERVAL_MS = 5000;
 constexpr uint32_t OTA_RETRY_INTERVAL_MS = 30000;
 constexpr uint32_t OTA_VALIDATION_TIMEOUT_MS = 240000;
+
+// Heartbeat watchdog timeouts. WiFiManager's setup portal can block for 180 s;
+// allow that full interval plus a margin before declaring wifi_task stalled.
+constexpr uint32_t MAIN_LOOP_WATCHDOG_TIMEOUT_MS = 5000;
+constexpr uint32_t WIFI_TASK_WATCHDOG_TIMEOUT_MS =
+    (static_cast<uint32_t>(WIFI_PORTAL_TIMEOUT_SECONDS) + 30U) * 1000U;
+constexpr uint32_t LED_TASK_WATCHDOG_TIMEOUT_MS = 5000;
+constexpr uint32_t OTA_TASK_WATCHDOG_TIMEOUT_MS = 120000;
+constexpr uint32_t TASK_WATCHDOG_CHECK_INTERVAL_MS = 250;
+constexpr uint32_t TASK_WATCHDOG_STACK_BYTES = 3072;
+constexpr uint8_t TASK_WATCHDOG_PRIORITY = 3;
 
 constexpr bool BLINK_MODE = false;
 constexpr uint32_t BLINK_INTERVAL_MS = 500;

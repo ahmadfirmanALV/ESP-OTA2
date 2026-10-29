@@ -43,7 +43,11 @@ Keep this window open. The certificate must be valid for the host the ESP32 uses
 
 ## ESP32 dummy MQTT values
 
-The ESP32 derives a stable ID from its 48-bit MAC and prints it in Serial Monitor, for example `esp32-ota-14335c524234`. Its status topic is `gateway/status/<device-id>`, its dummy value topic is `gateway/dummy/<device-id>/random`, and its device-specific OTA topic is `gateway/ota/update/<device-id>`. It also listens to the shared `gateway/ota/update` topic for broadcast announcements. The dummy topic publishes a random integer from `0` to `100` every five seconds, for example `42`. In MQTT Explorer, expand `gateway` to see the topics for each device.
+The ESP32 derives a stable ID from its 48-bit MAC and prints it in Serial Monitor, for example `esp32-ota-14335c524234`. Its status topic is `gateway/status/<device-id>`, current firmware version topic is `gateway/version/current/<device-id>`, dummy value topic is `gateway/dummy/<device-id>/random`, and device-specific OTA topic is `gateway/ota/update/<device-id>`. The OTA server publishes the latest GitHub Release tag to `gateway/version/latest/<device-id>`. Both version topics retain their values so MQTT Explorer can show the running version beside the latest available version. The ESP32 also listens to the shared `gateway/ota/update` topic for broadcast announcements. The dummy topic publishes a random integer from `0` to `100` every five seconds, for example `42`.
+
+## Task watchdog and Wi-Fi recovery
+
+A software watchdog supervisor checks heartbeats from the main loop, Wi-Fi, LED, and OTA tasks. If one stops responding past its configured timeout, the ESP32 restarts. The Wi-Fi task stays active after initial setup and retries the saved access point every five seconds after a disconnect. The Wi-Fi watchdog timeout includes the full 180-second configuration-portal timeout plus a margin, and the OTA task has a longer timeout for firmware downloads. This application supervisor does not reconfigure the ESP-IDF hardware task watchdog.
 
 Use `OTA_DEVICE_REPOS` to map each ESP32 ID printed by its Serial Monitor to that device's GitHub repository. The server checks each repository's latest GitHub Release independently and publishes its `firmware.bin` only to that device's OTA topic. Do not map a device to a repository whose firmware has a different board, network, or partition configuration. Firmware that only listens to the shared topic must be migrated over USB before it can receive a per-device announcement. Restart the Python server after changing the mapping. The default GitHub check interval is five minutes; this checks Releases, not every commit pushed to a branch.
 
@@ -67,7 +71,7 @@ $env:OTA_DEVICE_REPOS = "esp32-ota-14335c524234=ahmadfirmanALV/ESP-OTA;esp32-ota
 python .\ota_server.py
 ```
 
-Change the example certificate path if needed. For an external broker, use its hostname and CA certificate settings. Each mapped repository must have a latest GitHub Release containing `firmware.bin` and `ota_manifest.json`; each ESP32 must receive firmware built for its own configuration. Leave this server running. The health endpoint at `http://<server-ip>:5000/health` lists the configured repo-to-device mappings.
+Change the example certificate path if needed. For an external broker, use its hostname and CA certificate settings. Each mapped repository must have a latest GitHub Release containing `firmware.bin` and `ota_manifest.json`; each ESP32 must receive firmware built for its own configuration. The server publishes each repository's Release tag at `gateway/version/latest/<device-id>` and sends its OTA announcement to that device's update topic. Leave this server running. The health endpoint at `http://<server-ip>:5000/health` lists the configured repo-to-device mappings.
 
 ## Flash the ESP32 the first time
 

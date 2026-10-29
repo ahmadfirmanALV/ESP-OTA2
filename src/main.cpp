@@ -3,7 +3,9 @@
 #include <freertos/task.h>
 
 #include "app_events.h"
+#include "app_config.h"
 #include "app_log.h"
+#include "task_watchdog.h"
 #include "tasks/led/led_task.h"
 #include "tasks/ota/ota_task.h"
 #include "tasks/wifi/wifi_task.h"
@@ -25,6 +27,15 @@ void setup() {
     ESP.restart();
     return;
   }
+
+  if (!taskWatchdogInit()) {
+    appLog("Gagal memulai supervisor watchdog.");
+    delay(1000);
+    ESP.restart();
+    return;
+  }
+  taskWatchdogRegister(WatchedComponent::MainLoop,
+                       AppConfig::MAIN_LOOP_WATCHDOG_TIMEOUT_MS);
 
   appLog("=== ESP32 PlatformIO + FreeRTOS + WiFiManager + OTA ===");
 
@@ -51,5 +62,6 @@ void setup() {
 
 void loop() {
   // Seluruh pekerjaan aplikasi berjalan di task masing-masing.
+  taskWatchdogHeartbeat(WatchedComponent::MainLoop);
   vTaskDelay(pdMS_TO_TICKS(1000));
 }

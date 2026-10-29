@@ -5,6 +5,7 @@
 #include <freertos/task.h>
 
 #include "app_config.h"
+#include "task_watchdog.h"
 
 namespace {
 
@@ -16,6 +17,7 @@ void ledTask(void* parameter) {
 
   if (!AppConfig::BLINK_MODE) {
     for (;;) {
+      taskWatchdogHeartbeat(WatchedComponent::Led);
       vTaskDelay(pdMS_TO_TICKS(1000));
     }
   }
@@ -28,18 +30,26 @@ void ledTask(void* parameter) {
     vTaskDelayUntil(&lastWakeTime, interval);
     ledState = !ledState;
     digitalWrite(AppConfig::LED_PIN, ledState ? HIGH : LOW);
+    taskWatchdogHeartbeat(WatchedComponent::Led);
   }
 }
 
 }  // namespace
 
 bool ledTaskStart() {
-  return xTaskCreatePinnedToCore(
-             ledTask,
-             "led_task",
-             AppConfig::LED_TASK_STACK_BYTES,
-             nullptr,
-             1,
-             nullptr,
-             1) == pdPASS;
+  taskWatchdogRegister(WatchedComponent::Led,
+                       AppConfig::LED_TASK_WATCHDOG_TIMEOUT_MS);
+  const BaseType_t result = xTaskCreatePinnedToCore(
+      ledTask,
+      "led_task",
+      AppConfig::LED_TASK_STACK_BYTES,
+      nullptr,
+      1,
+      nullptr,
+      1);
+  if (result != pdPASS) {
+    taskWatchdogUnregister(WatchedComponent::Led);
+    return false;
+  }
+  return true;
 }
