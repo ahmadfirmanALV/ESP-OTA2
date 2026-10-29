@@ -322,9 +322,15 @@ void retryOtaAnnouncementIfVersionOutdated() {
 }
 
 void publishDummyValue() {
-  const uint32_t value = esp_random() % 101U;
-  char payload[4];
-  snprintf(payload, sizeof(payload), "%u", static_cast<unsigned int>(value));
+  const uint32_t scaledValue = esp_random() % 10001U;
+  const float value = static_cast<float>(scaledValue) / 100.0f;
+  const uint32_t wholePart = static_cast<uint32_t>(value);
+  const uint32_t fractionPart = scaledValue % 100U;
+  char payload[8];
+  // Keep the MQTT number locale-independent and avoid printf float support.
+  snprintf(payload, sizeof(payload), "%lu.%02lu",
+           static_cast<unsigned long>(wholePart),
+           static_cast<unsigned long>(fractionPart));
 
   if (mqttClient.publish(mqttDummyTopic, payload, false)) {
     appLogf("Dummy MQTT terkirim: %s = %s",
