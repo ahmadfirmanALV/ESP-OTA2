@@ -245,15 +245,9 @@ bool connectMqtt() {
 }
 
 void publishDummyValue() {
-  // Encode a random value from 0.00 to 100.00 as a decimal MQTT payload.
-  // MQTT carries bytes, so consumers can parse this text as a floating-point number.
-  const uint32_t scaledValue = esp_random() % 10001U;
-  const uint32_t wholePart = scaledValue / 100U;
-  const uint32_t fractionPart = scaledValue % 100U;
-  char payload[8];
-  snprintf(payload, sizeof(payload), "%lu.%02lu",
-           static_cast<unsigned long>(wholePart),
-           static_cast<unsigned long>(fractionPart));
+  const uint32_t value = esp_random() % 101U;
+  char payload[4];
+  snprintf(payload, sizeof(payload), "%u", static_cast<unsigned int>(value));
 
   if (mqttClient.publish(mqttDummyTopic, payload, false)) {
     appLogf("Dummy MQTT terkirim: %s = %s",
