@@ -103,24 +103,17 @@ def publish_update(payload, device_id, version):
             if device_id
             else MQTT_TOPIC_VERSION_LATEST
         )
-        # A broker ACL may allow OTA announcements but deny the informational
-        # version topic. Keep those publications independent so version reporting
-        # cannot prevent a firmware update from being announced.
-        for topic, message, required in (
-            (update_topic, payload, True),
-            (version_topic, version, False),
+        # Publish the latest tag first so the ESP32 can validate that the
+        # following retained OTA command matches the release selected by GitHub.
+        for topic, message in (
+            (version_topic, version),
+            (update_topic, payload),
         ):
-            try:
-                result = client.publish(topic, message, qos=1, retain=True)
-                result.wait_for_publish(timeout=15)
-                if result.rc != mqtt.MQTT_ERR_SUCCESS or not result.is_published():
-                    raise RuntimeError(f"MQTT publish gagal ke {topic}, rc={result.rc}")
-            except Exception:
-                if required:
-                    raise
-                logger.exception("Gagal mempublikasikan versi terbaru ke %s.", topic)
-                continue
-            logger.info("Pesan OTA dipublikasikan ke topic %s.", topic)
+            result = client.publish(topic, message, qos=1, retain=True)
+            result.wait_for_publish(timeout=15)
+            if result.rc != mqtt.MQTT_ERR_SUCCESS or not result.is_published():
+                raise RuntimeError(f"MQTT publish gagal ke {topic}, rc={result.rc}")
+            logger.info("Pesan dipublikasikan ke topic %s.", topic)
     finally:
         client.disconnect()
         client.loop_stop()

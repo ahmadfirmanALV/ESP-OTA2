@@ -43,7 +43,7 @@ Keep this window open. The certificate must be valid for the host the ESP32 uses
 
 ## ESP32 dummy MQTT values
 
-The ESP32 derives a stable ID from its 48-bit MAC and prints it in Serial Monitor, for example `esp32-ota-14335c524234`. Its status topic is `gateway/status/<device-id>`, current firmware version topic is `gateway/version/current/<device-id>`, dummy value topic is `gateway/dummy/<device-id>/random`, and device-specific OTA topic is `gateway/ota/update/<device-id>`. The OTA server publishes the latest GitHub Release tag to `gateway/version/latest/<device-id>`. Both version topics retain their values so MQTT Explorer can show the running version beside the latest available version. The ESP32 also listens to the shared `gateway/ota/update` topic for broadcast announcements. The dummy topic publishes a random integer from `0` to `100` every five seconds, for example `42`.
+The ESP32 derives a stable ID from its 48-bit MAC and prints it in Serial Monitor, for example `esp32-ota-14335c524234`. Its status topic is `gateway/status/<device-id>`, current firmware version topic is `gateway/version/current/<device-id>`, dummy value topic is `gateway/dummy/<device-id>/random`, and device-specific OTA topic is `gateway/ota/update/<device-id>`. The OTA server publishes the latest GitHub Release tag to `gateway/version/latest/<device-id>` before publishing the matching retained OTA command. Both version topics retain their values so MQTT Explorer can show the running version beside the latest available version. The ESP32 compares those versions, ignores stale OTA commands, and re-subscribes to its retained OTA command every 30 seconds while it is behind. The ESP32 also listens to the shared `gateway/ota/update` topic for broadcast announcements. The dummy topic publishes a random integer from `0` to `100` every five seconds, for example `42`.
 
 ## Task watchdog and Wi-Fi recovery
 
@@ -71,7 +71,7 @@ $env:OTA_DEVICE_REPOS = "esp32-ota-14335c524234=ahmadfirmanALV/ESP-OTA;esp32-ota
 python .\ota_server.py
 ```
 
-Change the example certificate path if needed. For an external broker, use its hostname and CA certificate settings. Each mapped repository must have a latest GitHub Release containing `firmware.bin` and `ota_manifest.json`; each ESP32 must receive firmware built for its own configuration. The server publishes each repository's Release tag at `gateway/version/latest/<device-id>` and sends its OTA announcement to that device's update topic. Leave this server running. The health endpoint at `http://<server-ip>:5000/health` lists the configured repo-to-device mappings.
+Change the example certificate path if needed. For an external broker, use its hostname and CA certificate settings. Each mapped repository must have a latest GitHub Release containing `firmware.bin` and `ota_manifest.json`; each ESP32 must receive firmware built for its own configuration. The server publishes each repository's Release tag at `gateway/version/latest/<device-id>` before its OTA announcement, so the ESP32 can reject a retained command from an older Release. Leave this server running. The health endpoint at `http://<server-ip>:5000/health` lists the configured repo-to-device mappings.
 
 ## Flash the ESP32 the first time
 

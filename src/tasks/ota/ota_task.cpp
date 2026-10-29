@@ -38,7 +38,11 @@ char otaDeviceId[32] = {};
 char otaDeviceTopic[96] = {};
 char mqttStatusTopic[96] = {};
 char mqttCurrentVersionTopic[112] = {};
+char mqttLatestVersionTopic[112] = {};
 char mqttDummyTopic[112] = {};
+char latestReleaseVersion[64] = {};
+bool latestVersionOutdated = false;
+uint32_t lastOtaAnnouncementRequestAt = 0;
 
 void configureDeviceIdentity() {
   const uint64_t baseMac = ESP.getEfuseMac() & 0xFFFFFFFFFFFFULL;
@@ -51,6 +55,8 @@ void configureDeviceIdentity() {
            AppConfig::MQTT_TOPIC_STATUS_PREFIX, otaDeviceId);
   snprintf(mqttCurrentVersionTopic, sizeof(mqttCurrentVersionTopic), "%s%s",
            AppConfig::MQTT_TOPIC_VERSION_CURRENT_PREFIX, otaDeviceId);
+  snprintf(mqttLatestVersionTopic, sizeof(mqttLatestVersionTopic), "%s%s",
+           AppConfig::MQTT_TOPIC_VERSION_LATEST_PREFIX, otaDeviceId);
   snprintf(mqttDummyTopic, sizeof(mqttDummyTopic), "%s%s%s",
            AppConfig::MQTT_TOPIC_DUMMY_PREFIX, otaDeviceId,
            AppConfig::MQTT_TOPIC_DUMMY_SUFFIX);
@@ -160,8 +166,37 @@ bool isAllowedFirmwareUrl(const char* url) {
 }
 
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
-  if (strcmp(topic, AppConfig::MQTT_TOPIC_OTA_BROADCAST) != 0 &&
-      strcmp(topic, otaDeviceTopic) != 0) {
+  const bool isLatestVersionTopic = strcmp(topic, mqttLatestVersionTopic) == 0;
+  const bool isOtaTopic = strcmp(topic, AppConfig::MQTT_TOPIC_OTA_BROADCAST) == 0 ||
+                          strcmp(topic, otaDeviceTopic) == 0;
+  if (!isLatestVersionTopic && !isOtaTopic) {
+    return;
+  }
+
+  if (isLatestVersionTopic) {
+    if (length == 0 || length >= sizeof(latestReleaseVersion)) {
+      appLog("Topic versi terbaru berisi payload kosong atau terlalu panjang.");
+      return;
+    }
+
+    char receivedLatestVersion[sizeof(latestReleaseVersion)] = {};
+    memcpy(receivedLatestVersion, payload, length);
+    receivedLatestVersion[length] = '\0';
+    if (receivedLatestVersion[0] != 'v') {
+      appLog("Format versi terbaru dari server tidak valid.");
+      return;
+    }
+
+    strlcpy(latestReleaseVersion, receivedLatestVersion,
+            sizeof(latestReleaseVersion));
+    latestVersionOutdated = strcmp(latestReleaseVersion, APP_VERSION) != 0;
+    lastOtaAnnouncementRequestAt = 0;
+    if (latestVersionOutdated) {
+      appLogf("Versi aktif %s tertinggal dari latest %s; menunggu perintah OTA yang cocok.",
+              APP_VERSION, latestReleaseVersion);
+    } else {
+      appLogf("Versi aktif sudah sama dengan latest: %s.", APP_VERSION);
+    }
     return;
   }
 
@@ -188,6 +223,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
       strlen(version) >= sizeof(queuedOtaRequest.version) ||
       strlen(url) >= sizeof(queuedOtaRequest.url)) {
     appLog("Pesan MQTT OTA harus berisi version, url, dan MD5 32 karakter.");
+    return;
+  }
+
+  if (latestReleaseVersion[0] != '\0' &&
+      strcmp(version, latestReleaseVersion) != 0) {
+    latestVersionOutdated = strcmp(latestReleaseVersion, APP_VERSION) != 0;
+    appLogf("Pengumuman OTA %s diabaikan karena versi latest server adalah %s.",
+            version, latestReleaseVersion);
     return;
   }
 
@@ -230,6 +273,9 @@ bool connectMqtt() {
     return false;
   }
 
+  if (!mqttClient.subscribe(mqttLatestVersionTopic, 1)) {
+    appLogf("Subscribe topic versi terbaru gagal: %s", mqttLatestVersionTopic);
+  }
   if (!mqttClient.subscribe(otaDeviceTopic, 1)) {
     appLogf("Subscribe topik OTA perangkat gagal: %s", otaDeviceTopic);
     mqttClient.disconnect();
@@ -252,6 +298,27 @@ bool connectMqtt() {
             mqttCurrentVersionTopic, APP_VERSION);
   }
   return true;
+}
+
+void retryOtaAnnouncementIfVersionOutdated() {
+  if (!latestVersionOutdated || queuedOtaRequest.pending || !mqttClient.connected()) {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (lastOtaAnnouncementRequestAt != 0 &&
+      now - lastOtaAnnouncementRequestAt <
+          AppConfig::OTA_ANNOUNCEMENT_RETRY_INTERVAL_MS) {
+    return;
+  }
+
+  lastOtaAnnouncementRequestAt = now;
+  if (mqttClient.subscribe(otaDeviceTopic, 1)) {
+    appLogf("Meminta ulang retained OTA announcement; aktif=%s, latest=%s.",
+            APP_VERSION, latestReleaseVersion);
+  } else {
+    appLogf("Gagal meminta ulang OTA announcement pada topic %s.", otaDeviceTopic);
+  }
 }
 
 void publishDummyValue() {
@@ -435,6 +502,7 @@ void otaTask(void* parameter) {
       if (mqttConfigured) {
         if (mqttClient.connected()) {
           mqttClient.loop();
+          retryOtaAnnouncementIfVersionOutdated();
           if (millis() - lastDummyPublishAt >=
               AppConfig::MQTT_DUMMY_PUBLISH_INTERVAL_MS) {
             lastDummyPublishAt = millis();

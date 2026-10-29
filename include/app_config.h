@@ -56,6 +56,7 @@ constexpr char MQTT_TOPIC_OTA_BROADCAST[] = "gateway/ota/update";
 constexpr char MQTT_TOPIC_OTA_DEVICE_PREFIX[] = "gateway/ota/update/";
 constexpr char MQTT_TOPIC_STATUS_PREFIX[] = "gateway/status/";
 constexpr char MQTT_TOPIC_VERSION_CURRENT_PREFIX[] = "gateway/version/current/";
+constexpr char MQTT_TOPIC_VERSION_LATEST_PREFIX[] = "gateway/version/latest/";
 constexpr char MQTT_TOPIC_DUMMY_PREFIX[] = "gateway/dummy/";
 constexpr char MQTT_TOPIC_DUMMY_SUFFIX[] = "/random";
 constexpr char MQTT_USERNAME[] = OTA_MQTT_USERNAME;
@@ -68,6 +69,7 @@ constexpr const char* MQTT_ROOT_CA_CERT = "";
 constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 5000;
 constexpr uint32_t WIFI_RECONNECT_INTERVAL_MS = 10000;
 constexpr uint32_t MQTT_DUMMY_PUBLISH_INTERVAL_MS = 5000;
+constexpr uint32_t OTA_ANNOUNCEMENT_RETRY_INTERVAL_MS = 30000;
 constexpr uint32_t OTA_RETRY_INTERVAL_MS = 30000;
 constexpr uint32_t OTA_VALIDATION_TIMEOUT_MS = 240000;
 
